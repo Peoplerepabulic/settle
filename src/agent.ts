@@ -33,6 +33,35 @@ interface ReactionInfo {
   targetMessageId?: string;
 }
 
+/** Platforms whose clients don't render Markdown (iMessage shows raw **). */
+const PLAIN_TEXT_PLATFORMS = new Set(["imessage", "local_imessage"]);
+
+/** Strip Markdown down to readable plain text for non-rendering clients. */
+function stripMarkdown(text: string): string {
+  return (
+    text
+      // links: [text](url) -> text (url)
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
+      // bold / italic / strikethrough / inline code (longest markers first)
+      .replace(/\*\*\*([^*]+)\*\*\*/g, "$1")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/__([^_]+)__/g, "$1")
+      .replace(/~~([^~]+)~~/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/(^|\W)\*([^*\n]+)\*/g, "$1$2")
+      .replace(/(^|\W)_([^_\n]+)_/g, "$1$2")
+      // headings and blockquotes
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/^>\s?/gm, "")
+  );
+}
+
+function platformOf(space: Space, message?: Message): string {
+  if (message?.platform) return message.platform;
+  const p = (space as { __platform?: unknown }).__platform;
+  return typeof p === "string" ? p : "";
+}
+
 /** Best-effort parse of an inbound reaction (tapback). */
 function asReaction(message: Message): ReactionInfo | undefined {
   const c = message.content as {
@@ -53,9 +82,12 @@ export async function runAgent(deps: AgentDeps): Promise<void> {
   const ctx: EngineCtx = {
     async send(space: Space, text: string): Promise<string | undefined> {
       try {
+        const body = PLAIN_TEXT_PLATFORMS.has(platformOf(space))
+          ? stripMarkdown(text)
+          : text;
         // responding() wraps the send in typing start/stop; providers
         // without typing indicators silently no-op.
-        const sent = await space.responding(() => space.send(text));
+        const sent = await space.responding(() => space.send(body));
         return sent?.id;
       } catch (err) {
         console.error("[settle] send failed:", err instanceof Error ? err.message : err);
@@ -64,7 +96,10 @@ export async function runAgent(deps: AgentDeps): Promise<void> {
     },
     async reply(message: Message, text: string): Promise<void> {
       try {
-        await message.reply(text);
+        const body = PLAIN_TEXT_PLATFORMS.has(platformOf(message.space, message))
+          ? stripMarkdown(text)
+          : text;
+        await message.reply(body);
       } catch (err) {
         console.error("[settle] reply failed:", err instanceof Error ? err.message : err);
       }
